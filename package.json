@@ -1,6 +1,6 @@
 {
   "name": "dsh-turn-meta-badge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Show the model, reasoning effort, turn tokens and (via the usage-billing plugin) the turn cost at the bottom-right of every assistant reply in the DeepSeek Harness web GUI.",
   "type": "module",
@@ -22,10 +22,7 @@
   ],
   "dsh": {
     "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-chat"
-      ]
+      "platform": "web"
     }
   },
   "files": [
