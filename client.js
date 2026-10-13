@@ -3,15 +3,17 @@
  *
  * One occupant of the completed-Turn footer slot `conversation.chat.turnTail`
  * (declared by `@deepseek-ai/dsh-client-ui-chat`), right-aligned so it reads as
- * the bottom-right meta line of every assistant reply:
+ * the bottom-right meta line of every assistant reply — everything inline, no
+ * hover dependency:
  *
- *     deepseek-flash · 思考深度 高 · 用量 25.2K tok · ¥0.1032
+ *     glm-5.3-flash · 思考深度 高 · 21.6万 tok · ¥0.103
  *
- * Model, reasoning effort and per-Turn tokens come from the host-half Session
- * projection `turnMeta`. Cost (CNY) comes from the installed usage-billing
- * plugin's loopback route `/api/billing/usage-stats` (`byTurn` rows) when that
- * plugin is present; without it the cost segment is simply absent, and without
- * the projection the badge degrades to the Session's current `modelSelection`.
+ * Data sources, in priority order:
+ * - tokens & cost: the installed usage-billing plugin's loopback route
+ *   `/api/billing/usage-stats` (`byTurn` rows carry per-turn token buckets and
+ *   the CNY cost) — polled, so it never depends on when the page was loaded;
+ * - model & reasoning effort: the host-half Session projection `turnMeta`
+ *   (per-turn), degrading to the Session's current `modelSelection`.
  *
  * Plain-JS bundle: no build step, no dependency beyond the platform seed table.
  */
@@ -28,11 +30,11 @@ window.__ModuleLoader__.load({
     /** `id` of the injected stylesheet, so a reload replaces rather than stacks it. */
     const STYLE_ID = 'dsh-turn-meta-badge-style'
 
-    /** Polled route of the usage-billing plugin; the only cost source on this host. */
-    const COST_ROUTE = '/api/billing/usage-stats'
+    /** Polled route of the usage-billing plugin; the primary token/cost source. */
+    const STATS_ROUTE = '/api/billing/usage-stats'
 
-    /** Default cost poll period: the billing host coalesces its own aggregation for 5s. */
-    const DEFAULT_POLL_MS = 30000
+    /** Poll period: fresh enough for a just-finished Turn, light enough to leave on. */
+    const DEFAULT_POLL_MS = 15000
 
     const CSS = [
       '.dsh-turn-meta-row{display:flex;justify-content:flex-end;width:100%;min-width:0;margin-bottom:-8px}',
@@ -72,7 +74,7 @@ window.__ModuleLoader__.load({
       return typeof lang === 'string' && lang.toLowerCase().startsWith('zh')
     }
 
-    /** Whether one projection field is a renderable non-negative count. */
+    /** Whether one field is a renderable non-negative number. */
     function isCount(value) {
       return typeof value === 'number' && Number.isFinite(value) && value >= 0
     }
@@ -88,11 +90,6 @@ window.__ModuleLoader__.load({
       const scaled = (candidate) => (candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10))
       if (value < 1000000) return `${scaled(value / 1000)}K`
       return `${scaled(value / 1000000)}M`
-    }
-
-    /** Exact figure for the hover detail. */
-    function exact(value) {
-      return isCount(value) ? value.toLocaleString('en-US') : ''
     }
 
     /**
@@ -117,50 +114,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Hover detail: exact buckets of the Turn beyond the inline summary.
-     * @param entry - the turn's `turnMeta` row (`undefined` when the projection missed it).
-     * @param live - the projection's in-force header.
-     * @param turnCost - this Turn's CNY cost, when the billing host reported one.
-     * @param sessionCost - the Session's cumulative CNY cost, when reported.
-     * @param chinese - whether to label in Chinese.
-     * @returns the tooltip text, or `undefined` when there is nothing to add.
+     * One Turn's token buckets as the billing host reported them.
+     * @param row - a `byTurn` row (`{input, output, cacheHit, cacheMiss, …}`).
+     * @returns the summed token count, or `undefined` when the row carries none.
      */
-    function detailOf(entry, live, turnCost, sessionCost, chinese) {
-      const lines = []
-      const route = entry ?? live
-      if (route !== undefined && route !== null && typeof route.provider === 'string' && typeof route.model === 'string') {
-        lines.push(`${route.provider} / ${route.model}`)
-      }
-      if (entry !== undefined && entry !== null) {
-        const effort = effortLabel(entry.reasoningEffort, chinese)
-        if (effort !== null) lines.push(`${chinese ? '思考深度' : 'Reasoning effort'}: ${effort}`)
-        if (isCount(entry.inputTokens)) lines.push(`${chinese ? '未缓存输入' : 'Uncached input'}: ${exact(entry.inputTokens)}`)
-        if (isCount(entry.cacheReadTokens)) lines.push(`${chinese ? '缓存读取' : 'Cached input'}: ${exact(entry.cacheReadTokens)}`)
-        if (isCount(entry.cacheWriteTokens)) lines.push(`${chinese ? '缓存写入' : 'Cache write'}: ${exact(entry.cacheWriteTokens)}`)
-        if (isCount(entry.outputTokens)) {
-          const reasoning = isCount(entry.reasoningTokens)
-            ? chinese
-              ? `（其中推理 ${exact(entry.reasoningTokens)}）`
-              : ` (${exact(entry.reasoningTokens)} reasoning)`
-            : ''
-          lines.push(`${chinese ? '输出' : 'Output'}: ${exact(entry.outputTokens)}${reasoning}`)
-        }
-        if (isCount(entry.totalTokens)) lines.push(`${chinese ? '合计' : 'Total'}: ${exact(entry.totalTokens)}`)
-      } else {
-        // The page loaded before this plugin's projection existed; its Session
-        // payload carries no `turnMeta` until the next load.
-        lines.push(chinese ? '未收到本轮用量：刷新一次页面即可载入 host 投影 turnMeta' : 'Turn usage unavailable: reload the page once to receive the turnMeta projection')
-      }
-      if (Number.isFinite(turnCost)) lines.push(`${chinese ? '本轮费用' : 'Turn cost'}: ¥${formatCny(turnCost)}`)
-      if (Number.isFinite(sessionCost)) lines.push(`${chinese ? '本会话累计' : 'Session total'}: ¥${formatCny(sessionCost)}`)
-      return lines.length === 0 ? undefined : lines.join('\n')
+    function tokensOfRow(row) {
+      const total = (row.input ?? 0) + (row.output ?? 0) + (row.cacheHit ?? 0) + (row.cacheMiss ?? 0)
+      return total > 0 ? total : undefined
     }
 
     /**
-     * Polled cost store over the usage-billing plugin's `byTurn`/`bySession` rows.
+     * Polled store over the usage-billing plugin's `byTurn`/`bySession` rows:
+     * per-Turn tokens & cost, plus per-Session totals.
      * @returns the store handle used by the badge component.
      */
-    function createCostStore() {
+    function createStatsStore() {
       const listeners = new Set()
       let snapshot = { status: 'idle', turns: null, sessions: null }
       let timer = null
@@ -180,9 +148,9 @@ window.__ModuleLoader__.load({
           return
         }
         try {
-          const response = await fetchImpl(COST_ROUTE, { headers: { accept: 'application/json' }, credentials: 'same-origin' })
+          const response = await fetchImpl(STATS_ROUTE, { headers: { accept: 'application/json' }, credentials: 'same-origin' })
           if (response === undefined || response === null || response.ok !== true) {
-            // No billing host on this profile: stop asking, keep the tokens line.
+            // No billing host on this profile: stop asking.
             publish({ status: 'unavailable', turns: null, sessions: null })
             stopTimer()
             return
@@ -190,7 +158,13 @@ window.__ModuleLoader__.load({
           const document_ = await response.json()
           const turns = new Map()
           for (const row of Array.isArray(document_?.byTurn) ? document_.byTurn : []) {
-            if (typeof row?.sessionId === 'string' && Number.isFinite(row?.cost)) turns.set(`${row.sessionId}#${row.turn}`, row.cost)
+            if (typeof row?.sessionId !== 'string') continue
+            const turn = typeof row?.turn === 'number' ? row.turn : undefined
+            if (turn === undefined) continue
+            turns.set(`${row.sessionId}#${turn}`, {
+              tokens: tokensOfRow(row),
+              cost: Number.isFinite(row?.cost) ? row.cost : undefined,
+            })
           }
           const sessions = new Map()
           for (const row of Array.isArray(document_?.bySession) ? document_.bySession : []) {
@@ -240,15 +214,15 @@ window.__ModuleLoader__.load({
     }
 
     /** One store per plugin instance; the slot occupant subscribes to it. */
-    const costStore = createCostStore()
+    const statsStore = createStatsStore()
 
     /** `useSyncExternalStore` when the platform React has it (React 18+). */
     const useSyncExternalStore = React.useSyncExternalStore
 
-    /** Subscribe the badge to polled costs without re-rendering on unrelated slot churn. */
-    function useCostSnapshot() {
+    /** Subscribe the badge to polled turn stats. */
+    function useStatsSnapshot() {
       if (typeof useSyncExternalStore !== 'function') return undefined
-      return useSyncExternalStore(costStore.subscribe, costStore.getSnapshot)
+      return useSyncExternalStore(statsStore.subscribe, statsStore.getSnapshot)
     }
 
     /**
@@ -262,7 +236,7 @@ window.__ModuleLoader__.load({
       const hasProjection = typeof useProjection === 'function'
       const projection = hasProjection ? useProjection('turnMeta') : undefined
       const selection = hasProjection ? useProjection('modelSelection') : undefined
-      const costs = useCostSnapshot()
+      const stats = useStatsSnapshot()
       const chinese = isChinese()
 
       const key = turn === undefined || turn === null ? undefined : String(turn)
@@ -286,11 +260,17 @@ window.__ModuleLoader__.load({
         (sessionSelection === undefined ? undefined : sessionSelection.reasoningEffort)
 
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : undefined
-      const turnCost =
-        costs !== undefined && costs.turns !== null && sessionId !== undefined && key !== undefined
-          ? costs.turns.get(`${sessionId}#${key}`)
+      const billing =
+        stats !== undefined && stats.turns !== null && sessionId !== undefined && key !== undefined
+          ? stats.turns.get(`${sessionId}#${key}`)
           : undefined
-      const sessionCost = costs !== undefined && costs.sessions !== null && sessionId !== undefined ? costs.sessions.get(sessionId) : undefined
+      const sessionCost =
+        stats !== undefined && stats.sessions !== null && sessionId !== undefined ? stats.sessions.get(sessionId) : undefined
+
+      // Tokens: billing's per-turn buckets win (they are independent of page load
+      // timing); the host projection is the fallback.
+      const tokens = (billing === undefined ? undefined : billing.tokens) ?? (entry === undefined ? undefined : entry.totalTokens)
+      const cost = billing === undefined ? undefined : billing.cost
 
       const parts = []
       if (typeof model === 'string' && model !== '') {
@@ -300,13 +280,11 @@ window.__ModuleLoader__.load({
       if (effortText !== null) {
         parts.push(React.createElement('span', { key: 'effort' }, `${chinese ? '思考深度' : 'depth'} ${effortText}`))
       }
-      if (entry !== undefined && isCount(entry.totalTokens)) {
-        parts.push(
-          React.createElement('span', { key: 'usage' }, `${chinese ? '用量' : 'usage'} ${formatTokens(entry.totalTokens)} tok`),
-        )
+      if (isCount(tokens)) {
+        parts.push(React.createElement('span', { key: 'usage' }, `${chinese ? '用量' : 'usage'} ${formatTokens(tokens)} tok`))
       }
-      if (Number.isFinite(turnCost)) {
-        parts.push(React.createElement('span', { className: 'dsh-turn-meta__cost', key: 'cost' }, `¥${formatCny(turnCost)}`))
+      if (Number.isFinite(cost)) {
+        parts.push(React.createElement('span', { className: 'dsh-turn-meta__cost', key: 'cost' }, `¥${formatCny(cost)}`))
       }
       if (parts.length === 0) return null
 
@@ -320,16 +298,12 @@ window.__ModuleLoader__.load({
         children.push(parts[index])
       }
 
-      const source = entry !== undefined ? 'turn' : live !== undefined ? 'header' : sessionSelection !== undefined ? 'session' : 'none'
+      const source = billing !== undefined ? 'billing' : entry !== undefined ? 'turn' : live !== undefined ? 'header' : 'session'
 
       return React.createElement(
         'div',
         { className: 'dsh-turn-meta-row', 'data-turn-meta': key, 'data-turn-meta-source': source },
-        React.createElement(
-          'span',
-          { className: 'dsh-turn-meta', title: detailOf(entry, live, turnCost, sessionCost, chinese) },
-          children,
-        ),
+        React.createElement('span', { className: 'dsh-turn-meta' }, children),
       )
     }
 
@@ -337,9 +311,9 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
 
     /**
-     * Install the badge stylesheet, start the cost poll, and occupy the footer slot.
+     * Install the badge stylesheet, start the stats poll, and occupy the footer slot.
      * @param ctx - client root context.
-     * @param config - row config; `cost: false` disables the cost source, `pollMs` tunes it.
+     * @param config - row config; `cost: false` disables the billing poll, `pollMs` tunes it.
      */
     function apply(ctx, config) {
       const settings = config !== null && typeof config === 'object' ? config : {}
@@ -355,9 +329,9 @@ window.__ModuleLoader__.load({
 
       if (settings.cost !== false) {
         ctx.effect(() => {
-          costStore.start(settings.pollMs === undefined ? undefined : { pollMs: settings.pollMs })
-          return () => costStore.stop()
-        }, 'turn-meta-badge: cost poll')
+          statsStore.start(settings.pollMs === undefined ? undefined : { pollMs: settings.pollMs })
+          return () => statsStore.stop()
+        }, 'turn-meta-badge: stats poll')
       }
 
       ctx.slots.inject('conversation.chat.turnTail', () =>
