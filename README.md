@@ -3,8 +3,10 @@
 在 DeepSeek Harness（DSH）Web GUI 的**每条助手回复右下角**显示这一轮实际使用的东西：
 
 ```
-deepseek-flash · 思考深度 高 · 用量 25.2K tok · ¥0.103
+glm-5.3-flash · 思考深度 高 · 用量 2.2M tok · ¥0.103
 ```
+
+所有数字**直接写在徽章上**，不依赖悬停；悬停只是附加的精确分桶。
 
 鼠标悬停还能看到精确分桶与金额：
 
@@ -44,8 +46,9 @@ deepseek-official / deepseek-flash
 
 浏览器侧渲染时：
 
-- 模型 / 思考深度 / token 都来自 `turnMeta`；
-- 投影缺席（host 半边没加载）时退化为只显示会话当前的 `modelSelection`（模型 + 思考深度），不显示 token；
+- **token 与金额以 billing 的逐轮数据为主**（轮询获取，与页面加载时机无关，因此不会因为"页面早于插件加载"而缺失）；
+- 模型 / 思考深度来自 `turnMeta`（投影缺席时退化为会话当前的 `modelSelection`）；
+- token 的兜底也是 `turnMeta`（billing 没有该轮行时）；
 - 完全不认识这一轮时返回 `null`，不占位。
 
 思考深度（`reasoningEffort`）在 DSH 里**没有逐消息字段**：`assistant/message` 只带 provider/model，档位只存在于 `request/header` 的 `config.reasoningEffort`。本插件用投影按事件顺序折叠，因此拿到的是**该轮请求真正生效的档位**，而轨迹视图里那个 idea 之外没有别的逐消息来源。
