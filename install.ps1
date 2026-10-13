@@ -8,15 +8,16 @@
 #   用后者：不装 pnpm 包、不碰 profile\package.json、不依赖 node_modules，因而
 #   插件市场重写 package.json 时也不会把它清掉。
 #
-# 默认（绝对路径行，推荐）：
-#   pwsh -File install.ps1
-# 备选（pnpm 风格：建联接 + 在 profile\package.json 登记 link: 依赖 + 写包名行）：
-#   pwsh -File install.ps1 -PnpmLink
-# 卸载（两种形式都清）：
-#   pwsh -File install.ps1 -Uninstall
+# 幂等策略：**先删净再追加**。脚本把 patch 文件切成顶层条目（`- ` 开头，含其缩进
+# 续行与条目内注释），删掉所有提到本插件包名的条目，再在末尾追加一条。因此重复执行
+# 不会产生第二条同名行（两条 active 行解析到同一包名会让客户端模块组合直接失败）。
 #
-# 修改 client.js / index.js 之后需要重启 DSH Desktop：已挂载行的 JS 不做热替换
-# （Desktop 的 HMR 兜底只监视配置文件），只有刷新页面能拿到新的浏览器启动图。
+# 用法：
+#   pwsh -File install.ps1                 # 默认：绝对路径行（推荐）
+#   pwsh -File install.ps1 -PnpmLink       # 备选：建联接 + 登记 link: 依赖 + 写包名行
+#   pwsh -File install.ps1 -Uninstall      # 卸载（删条目、依赖行与联接）
+#
+# 改 JS 之后：改 client.js 刷新页面即可；改 index.js（host 半边）需要重启 DSH Desktop。
 
 [CmdletBinding()]
 param(
@@ -47,19 +48,16 @@ $link = Join-Path $nodeModules $packageName
 $manifestPath = Join-Path $ProfileDir 'package.json'
 $patchPath = Join-Path $ProfileDir 'cordis.patch.yml'
 
-# patch 块：绝对路径形式（默认）或包名形式（-Link）
+# 条目里所有注释都缩进（属于该条目），这样"按条目删除"就能把它一并带走。
 $rowName = if ($PnpmLink) { $packageName } else { ($entry -replace '\\', '/') }
 $patchBlock = @"
-# --- 每条助手回复右下角的「模型 · 思考深度 · 用量」徽章（本地插件 $packageName）---
-# 金额(¥)来自已装的 @kenz1117/dsh-ui-usage-billing 的 /api/billing/usage-stats：装了才显示，
-# 没装自动省略这一段。要关掉金额/改轮询周期，把下面两行注释打开即可。
-#      config: { cost: false, pollMs: 60000 }
 - insert:
+    # $packageName：每条助手回复右下角的「模型 · 思考深度 · 用量 · ¥金额」徽章。
+    # 金额来自本机已装的 @kenz1117/dsh-ui-usage-billing 的 /api/billing/usage-stats（人民币元）；没装就自动少这一段。
+    # 关掉金额 / 改轮询周期：在下一行前面加一行 config: { cost: false, pollMs: 60000 }
     - id: turn-meta-badge
       name: $rowName
 "@
-# 卸载时按这个标记定位本插件写入的整块内容。
-$blockMarker = "# --- 每条助手回复右下角的「模型 · 思考深度 · 用量」徽章"
 
 function Backup-File([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -68,16 +66,42 @@ function Backup-File([string]$Path) {
     Write-Host "已备份：$backup"
 }
 
-function Remove-PatchBlock([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    if ($text -notmatch [regex]::Escape($blockMarker)) { return }
-    Backup-File $Path
-    $pattern = "(?ms)^" + [regex]::Escape($blockMarker) + ".*?(?=^- |\z)"
-    $cleaned = [regex]::Replace($text, $pattern, '')
-    $cleaned = ($cleaned -replace "(`r?`n){3,}", "`n`n").TrimEnd() + "`n"
-    Set-Content -LiteralPath $Path -Value $cleaned -Encoding UTF8 -NoNewline
-    Write-Host "已从 cordis.patch.yml 移除 patch 块"
+# 一个顶层条目 = 一行 `- ` 开头 + 它的缩进续行/条目内注释，直到下一个 `- ` 行（或文件末尾）。
+$entryPattern = '(?ms)^- .*?(?=^- |\z)'
+
+<#
+.SYNOPSIS
+  删除 patch 文本里所有提到本插件包名的顶层条目，以及本脚本过去写在条目外的遗留注释行。
+#>
+function Remove-PluginEntries([string]$Text) {
+    $kept = New-Object System.Collections.Generic.List[string]
+    $cursor = 0
+    foreach ($match in [regex]::Matches($Text, $entryPattern)) {
+        $gap = $Text.Substring($cursor, $match.Index - $cursor)
+        if ($gap.Length -gt 0) { $kept.Add($gap) }
+        if ($match.Value -notmatch [regex]::Escape($packageName)) { $kept.Add($match.Value) }
+        $cursor = $match.Index + $match.Length
+    }
+    if ($cursor -lt $Text.Length) { $kept.Add($Text.Substring($cursor)) }
+
+    $joined = ($kept -join '')
+    # 0.1.x 版本的脚本把说明注释写在条目外面，重复执行会留下孤儿注释；按特征清掉。
+    $lines = $joined -split "`r?`n" | Where-Object {
+        -not ($_ -match '^#' -and $_ -match "(dsh-turn-meta-badge|dsh-ui-usage-billing|config: \{ cost)")
+    }
+    return (($lines -join "`n") -replace "(`r?`n){3,}", "`n`n").TrimEnd() + "`n"
+}
+
+<#
+.SYNOPSIS
+  统计 patch 文本里本插件的顶层条目数；用于写回前的自检。
+#>
+function Count-PluginEntries([string]$Text) {
+    $count = 0
+    foreach ($match in [regex]::Matches($Text, $entryPattern)) {
+        if ($match.Value -match [regex]::Escape($packageName)) { $count += 1 }
+    }
+    return $count
 }
 
 if ($Uninstall) {
@@ -103,7 +127,15 @@ if ($Uninstall) {
         }
     }
 
-    Remove-PatchBlock $patchPath
+    if (Test-Path -LiteralPath $patchPath) {
+        $patch = Get-Content -LiteralPath $patchPath -Raw -Encoding UTF8
+        $before = Count-PluginEntries $patch
+        if ($before -gt 0) {
+            Backup-File $patchPath
+            Set-Content -LiteralPath $patchPath -Value (Remove-PluginEntries $patch) -Encoding UTF8 -NoNewline
+            Write-Host "已从 cordis.patch.yml 移除 $before 条 patch 条目"
+        }
+    }
 
     Write-Host '卸载完成。在 DSH Desktop 里刷新页面（或重启）生效。'
     return
@@ -154,31 +186,30 @@ if ($PnpmLink) {
     }
 }
 
-# 2) 写 patch 行
+# 2) 写 patch 条目：先删净旧的，再追加一条
 if (-not (Test-Path -LiteralPath $patchPath)) {
     Set-Content -LiteralPath $patchPath -Value ($patchBlock + "`n") -Encoding UTF8
-    Write-Host '已创建 cordis.patch.yml 并写入 patch 块'
+    Write-Host '已创建 cordis.patch.yml 并写入 patch 条目'
 }
 else {
     $patch = Get-Content -LiteralPath $patchPath -Raw -Encoding UTF8
-    if ($patch -match [regex]::Escape($blockMarker)) {
-        # 已存在：整块替换，避免路径/形式变更后留下旧行。
-        Backup-File $patchPath
-        $pattern = "(?ms)^" + [regex]::Escape($blockMarker) + ".*?(?=^- |\z)"
-        $updated = [regex]::Replace($patch, $pattern, $patchBlock + "`n")
-        $updated = ($updated -replace "(`r?`n){3,}", "`n`n").TrimEnd() + "`n"
-        Set-Content -LiteralPath $patchPath -Value $updated -Encoding UTF8 -NoNewline
-        Write-Host '已更新 cordis.patch.yml 中的 patch 块'
+    $before = Count-PluginEntries $patch
+    Backup-File $patchPath
+    $cleaned = Remove-PluginEntries $patch
+    $updated = $cleaned.TrimEnd() + "`n`n" + $patchBlock + "`n"
+
+    $after = Count-PluginEntries $updated
+    if ($after -ne 1) {
+        Copy-Item -LiteralPath "$patchPath.bak-$packageName" -Destination $patchPath -Force
+        throw "自检失败：写回后本插件条目数为 $after（应为 1），已从备份还原 $patchPath"
     }
-    else {
-        Backup-File $patchPath
-        $updated = $patch.TrimEnd() + "`n`n" + $patchBlock + "`n"
-        Set-Content -LiteralPath $patchPath -Value $updated -Encoding UTF8 -NoNewline
-        Write-Host '已在 cordis.patch.yml 追加 patch 块'
-    }
+
+    Set-Content -LiteralPath $patchPath -Value $updated -Encoding UTF8 -NoNewline
+    if ($before -gt 0) { Write-Host "已替换 cordis.patch.yml 中的 patch 条目（清理旧条目 $before 条）" }
+    else { Write-Host '已在 cordis.patch.yml 追加 patch 条目' }
 }
 
 Write-Host ''
 Write-Host "安装完成（row name: $rowName）。"
-Write-Host 'profile patch 层受 HMR 监视，新行通常几秒内挂载；随后刷新页面（Ctrl+R）拿到新的浏览器启动图。'
-Write-Host '验证：每条助手回复右下角应出现「模型 · 思考深度 X · 用量 N tok」。'
+Write-Host 'profile patch 层受 HMR 监视，新行通常几秒内挂载；随后刷新页面（Ctrl+R）让会话载荷带上 turnMeta 投影。'
+Write-Host '验证：每条助手回复右下角应出现「模型 · 思考深度 X · 用量 N tok · ¥金额」。'
