@@ -1,8 +1,8 @@
 {
   "name": "dsh-turn-meta-badge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Show the model, reasoning effort and token usage at the bottom-right of every assistant reply in the DeepSeek Harness web GUI.",
+  "description": "Show the model, reasoning effort, turn tokens and (via the usage-billing plugin) the turn cost at the bottom-right of every assistant reply in the DeepSeek Harness web GUI.",
   "type": "module",
   "main": "index.js",
   "exports": {

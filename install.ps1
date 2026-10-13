@@ -51,6 +51,9 @@ $patchPath = Join-Path $ProfileDir 'cordis.patch.yml'
 $rowName = if ($PnpmLink) { $packageName } else { ($entry -replace '\\', '/') }
 $patchBlock = @"
 # --- 每条助手回复右下角的「模型 · 思考深度 · 用量」徽章（本地插件 $packageName）---
+# 金额(¥)来自已装的 @kenz1117/dsh-ui-usage-billing 的 /api/billing/usage-stats：装了才显示，
+# 没装自动省略这一段。要关掉金额/改轮询周期，把下面两行注释打开即可。
+#      config: { cost: false, pollMs: 60000 }
 - insert:
     - id: turn-meta-badge
       name: $rowName
