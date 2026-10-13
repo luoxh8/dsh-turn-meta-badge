@@ -1,0 +1,117 @@
+# dsh-turn-meta-badge
+
+在 DeepSeek Harness（DSH）Web GUI 的**每条助手回复右下角**显示这一轮实际使用的东西：
+
+```
+deepseek-flash · 思考深度 高 · 用量 25.2K tok
+```
+
+鼠标悬停还能看到精确分桶：
+
+```
+deepseek-official / deepseek-flash
+思考深度: 高
+未缓存输入: 3,221
+缓存读取: 21,504
+输出: 507
+合计: 25,232
+```
+
+- 纯 UI 插件：不注册工具、不注入系统提示、不写任何模型可见事件，只读别人已经落盘的会话日志。
+- 无需构建：`client.js` 就是浏览器直接加载的普通 JS。
+- 中文 / 英文标签跟随 GUI 语言（`document.documentElement.lang`）。
+
+## 数据从哪来
+
+两个半边：
+
+| 半边 | 文件 | 职责 |
+|---|---|---|
+| Host | `index.js` | 注册一个客户端可见的会话投影 `turnMeta`，把持久日志折成逐轮元数据 |
+| Browser | `client.js` | 占位 `conversation.chat.turnTail` 槽位，右对齐渲染徽章 |
+
+`turnMeta` 是 `@deepseek-ai/dsh-session-projection` 的普通投影单元，`stateVersion: 1`，按已提交事件同步折叠：
+
+| 日志事件 | 折叠动作 |
+|---|---|
+| `request/header` | 记住当前请求配置（`provider` / `model` / `reasoningEffort`）——DSH 只在配置变化时记录它，所以「最后一条」就是该请求生效的配置 |
+| `turn/start` | 为该轮建条目（建时即带上当前模型与思考深度，所以正在流式输出的轮也有值） |
+| `assistant/message` / `assistant/attempt` | 记录该 step 的 `usage` 桶（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `reasoningTokens` / `totalTokens`），模型取 `message.source.provider/model`（**这一步实际走的模型**，而不是会话当前选择） |
+| `llm/retry-started` | 丢弃该 `(turn, step)` 的旧桶，重试替换而非累加 |
+| 其他事件 | 原样返回同一引用（零下游开销） |
+
+浏览器侧渲染时：
+
+- 模型 / 思考深度 / token 都来自 `turnMeta`；
+- 投影缺席（host 半边没加载）时退化为只显示会话当前的 `modelSelection`（模型 + 思考深度），不显示 token；
+- 完全不认识这一轮时返回 `null`，不占位。
+
+思考深度（`reasoningEffort`）在 DSH 里**没有逐消息字段**：`assistant/message` 只带 provider/model，档位只存在于 `request/header` 的 `config.reasoningEffort`。本插件用投影按事件顺序折叠，因此拿到的是**该轮请求真正生效的档位**，而轨迹视图里那个 idea 之外没有别的逐消息来源。
+
+## 安装
+
+目标：DSH Desktop 的 web profile（`%APPDATA%\dsh-desktop\harness\profiles\web`，可用 `DSH_HOME` / `-ProfileDir` 覆盖）。
+
+```powershell
+# 默认：往 profile 的 cordis.patch.yml 追加一条绝对路径的 insert 行
+pwsh -File install.ps1
+
+# 备选：pnpm 风格（建 node_modules 联接 + 在 profile\package.json 登记 link: 依赖 + 写包名行）
+pwsh -File install.ps1 -PnpmLink
+
+# 卸载（两种形式都会清掉：patch 块、依赖行、联接）
+pwsh -File install.ps1 -Uninstall
+```
+
+默认的绝对路径形式不装 pnpm 包、不碰 `profile\package.json`，因此插件市场重写 `package.json` 时也不会把它清掉；代价是**插件目录挪位置后要重跑 install.ps1**（patch 里的路径会失效）。`-PnpmLink` 形式更"正规"，但 pnpm 安装动作可能清掉联接，需要重跑。
+
+改前一律备份：`cordis.patch.yml.bak-dsh-turn-meta-badge`、`package.json.bak-dsh-turn-meta-badge`。
+
+## 生效与迭代
+
+1. profile 的 `cordis.patch.yml` 受 HMR 监视（Desktop 的 HMR 兜底只提供配置监视这一部分），**新行插入后不需要重启**：Loader 会挂载它，客户端模块图随即出现 `dsh-turn-meta-badge`。
+2. **刷新页面（Ctrl+R）** 拿到新的浏览器启动图与 bundle。
+3. 之后修改 `index.js` / `client.js` **需要重启 DSH Desktop**：已挂载行的 JS 不做热替换（Desktop 没有模块热替换能力）。bundle 内容变更会换新的 `rev`，但页面只有整体重载才会用到它。
+
+## 验证
+
+```powershell
+# 单元测试：投影折叠（含真实会话日志回放）+ 浏览器半边离线渲染
+$env:DSH_SESSION_JSONL='<解压后的 session.jsonl>'   # 可选，加上就回放真实日志
+node --test test/turn-meta.test.mjs test/client.test.mjs
+```
+
+真实日志回放会把投影结果与「独立数原始事件」逐轮对比：轮集合、每轮 `totalTokens`/`inputTokens`/`outputTokens`、每轮模型与思考深度都必须一致。
+
+运行中的 GUI 也可以从启动图确认插件已被组合（不需要 token，loopback 资源路由免鉴权）：
+
+```powershell
+$html = (Invoke-WebRequest "http://127.0.0.1:43129/?token=<启动日志里的 token>").Content
+[regex]::Match($html, '\{"id":"dsh-turn-meta-badge".{0,80}').Value
+```
+
+`dsh web: http://127.0.0.1:43129/?token=…` 这一行在 `%APPDATA%\dsh-desktop\logs\harness.log` 里。
+
+## 已知限制
+
+- **每轮一条，不是每个 assistant step 一条**：槽位 `conversation.chat.turnTail` 是"整轮收尾"位置，工具调用中途的 assistant step 没有独立页脚。这是 DSH 现有的唯一逐轮页脚扩展点。
+- **只有正文回复才显示**：`turn-tail` 节点渲染在收尾助手消息之后；纯工具轮没有助手正文时不渲染徽章。
+- **token 是这一轮所有 attempt 的合计**，与内置「本轮用量」弹窗口径一致（缓存/推理桶只有在每个 attempt 都报告时才给出，不编造 0）。
+- 徽章在复制/分支图标行的**上一行右对齐**：DSH 没有"图标行右侧"的公开槽位，`assistant-actions` 槽会被插到复制图标与分支图标之间（左侧）。
+- 投影随会话全量日志增长（每轮几十字节）；这是 DSH 投影协议的共同约束（每个尾页携带每个 client-visible key）。
+
+## 文件
+
+```
+index.js             host 半边：turnMeta 投影（无任何 import，纯函数折叠）
+client.js            浏览器半边：__ModuleLoader__ 普通 JS bundle
+install.ps1          安装 / 卸载 / 备选联接模式
+test/turn-meta.test.mjs   投影折叠自测 + 真实日志回放
+test/client.test.mjs      浏览器半边离线自测（模块 id / 槽位 / 渲染文本）
+```
+
+## 与 ai-bootstrap 的关系
+
+本机的 profile patch（`profiles\web\cordis.patch.yml`）同时被 ai-bootstrap 的 `setup.ps1` 按 id 合并维护：它只替换同 id 的块、追加缺失的 insert 块、其余行一字不动，因此本插件写入的块（带 `# --- 每条助手回复右下角…` 标记）会原样保留。**不要**再把同一条 insert 行抄进 `config\dsh-profile-custom.patch.yml`：那会在下一次 setup 时追加出第二条同名行，两条 active 行解析到同一个包名会让客户端模块组合直接失败。
+
+从模板恢复 profile 后，重跑本仓库的 `install.ps1` 即可。
